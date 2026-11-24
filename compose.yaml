@@ -1,0 +1,26 @@
+services:
+  guardian:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: xray-gemini-guardian
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      GUARDIAN_DATA_DIR: /data
+      DISPLAY: ":99"
+    ports:
+      # Never change this to 0.0.0.0 without TLS, authentication and firewall.
+      - "127.0.0.1:6080:6080"
+    volumes:
+      - guardian_data:/data
+    shm_size: "1gb"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    stop_grace_period: 25s
+
+volumes:
+  guardian_data:
