@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import ipaddress
-import re
 import socket
 from urllib.error import HTTPError
 from urllib.parse import urlparse
@@ -105,6 +104,5 @@ def targets_for_run(store):
 
 def safe_source_label(url: str) -> str:
     parsed = urlparse(url)
-    hostname = parsed.hostname or "?"
-    path = re.sub(r"[^a-zA-Z0-9_/.-]", "", parsed.path)[:20]
-    return hostname + (path if len(path) < 15 else "/…")
+    # Subscription tokens are frequently embedded in the URL path.
+    return parsed.hostname or "(unknown host)"

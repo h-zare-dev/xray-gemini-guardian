@@ -84,6 +84,9 @@ class Store:
 
     def add_ports(self, ports: list[int]) -> int:
         with self.connect() as db:
+            existing = {r[0] for r in db.execute("SELECT port FROM ports")}
+            if len(existing.union(ports)) > 1000:
+                raise ValueError("حداکثر ۱۰۰۰ پورت در مجموع مجاز است.")
             before = db.total_changes
             db.executemany("INSERT OR IGNORE INTO ports(port,enabled) VALUES (?,1)", [(p,) for p in ports])
             return db.total_changes - before
