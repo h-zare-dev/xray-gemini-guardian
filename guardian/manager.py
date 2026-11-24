@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import logging
 import threading
 import time
 from pathlib import Path
@@ -13,12 +14,14 @@ from .reporting import STATUS_ICON, bucket, full_report_chunks, progress_message
 from .sources import targets_for_run
 from .storage import Store
 
+log = logging.getLogger(__name__)
+
 
 class RunManager:
-    def __init__(self, store: Store, bot, admin_id: int, loop: asyncio.AbstractEventLoop):
+    def __init__(self, store: Store, bot, admin_ids: tuple[int, ...], loop: asyncio.AbstractEventLoop):
         self.store = store
         self.bot = bot
-        self.admin_id = admin_id
+        self.admin_ids = admin_ids
         self.loop = loop
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -34,11 +37,37 @@ class RunManager:
     def login_active(self) -> bool:
         return bool(self._login_proc and self._login_proc.poll() is None)
 
+    async def _send_text_to_admins(self, message: str):
+        results = await asyncio.gather(
+            *(self.bot.send_message(chat_id=admin_id, text=message)
+              for admin_id in self.admin_ids),
+            return_exceptions=True,
+        )
+        for admin_id, result in zip(self.admin_ids, results):
+            if isinstance(result, BaseException):
+                log.warning("Telegram text delivery failed for admin %d: %s",
+                            admin_id, type(result).__name__)
+
+    async def _send_photo_to_admins(self, image: str, caption: str):
+        async def send_one(admin_id: int):
+            # A separate file object is needed for each concurrent upload.
+            with open(image, "rb") as photo:
+                await self.bot.send_photo(chat_id=admin_id, photo=photo,
+                                          caption=caption[:1024])
+
+        results = await asyncio.gather(
+            *(send_one(admin_id) for admin_id in self.admin_ids),
+            return_exceptions=True,
+        )
+        for admin_id, result in zip(self.admin_ids, results):
+            if isinstance(result, BaseException):
+                log.warning("Telegram photo delivery failed for admin %d: %s",
+                            admin_id, type(result).__name__)
+
     def tell(self, message: str):
         try:
             asyncio.run_coroutine_threadsafe(
-                self.bot.send_message(chat_id=self.admin_id, text=message),
-                self.loop
+                self._send_text_to_admins(message), self.loop
             ).result(timeout=15)
         except Exception:
             # Audit persists in SQLite even if Telegram delivery fails.
@@ -46,11 +75,9 @@ class RunManager:
 
     def send_photo(self, image: str, caption: str):
         try:
-            async def send():
-                with open(image, "rb") as photo:
-                    await self.bot.send_photo(chat_id=self.admin_id, photo=photo,
-                                              caption=caption[:1024])
-            asyncio.run_coroutine_threadsafe(send(), self.loop).result(timeout=45)
+            asyncio.run_coroutine_threadsafe(
+                self._send_photo_to_admins(image, caption), self.loop
+            ).result(timeout=45)
         except Exception:
             pass
 

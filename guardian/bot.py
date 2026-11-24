@@ -1,4 +1,4 @@
-"""Persian inline-button Telegram control panel; private admin only."""
+"""Persian inline-button Telegram control panel; private admins only."""
 from __future__ import annotations
 
 import asyncio
@@ -37,7 +37,8 @@ def short(text, maximum=60):
 
 class GuardianBot:
     def __init__(self):
-        token, self.admin_id = bootstrap_credentials()
+        token, admin_ids = bootstrap_credentials()
+        self.admin_ids = frozenset(admin_ids)
         self.store = Store()
         self.manager: RunManager | None = None
         self.app = (Application.builder().token(token)
@@ -50,20 +51,21 @@ class GuardianBot:
         self.app.add_error_handler(self.error_handler)
 
     async def post_init(self, app: Application):
-        self.manager = RunManager(self.store, app.bot, self.admin_id,
+        self.manager = RunManager(self.store, app.bot, tuple(sorted(self.admin_ids)),
                                   asyncio.get_running_loop())
         if app.job_queue:
             app.job_queue.run_repeating(self.schedule_tick, interval=60, first=60)
         # No full VLESS URI, subscription secret, password, or Google cookie is logged.
-        try:
-            await app.bot.send_message(
-                chat_id=self.admin_id,
-                text="🛡 Gemini Guardian روشن شد. برای مدیریت /start را بزنید."
-            )
-        except Exception:
-            # Telegram forbids a bot from initiating a conversation before
-            # the administrator presses Start. This is not a boot failure.
-            log.info("Startup message unavailable; administrator should send /start.")
+        for admin_id in self.admin_ids:
+            try:
+                await app.bot.send_message(
+                    chat_id=admin_id,
+                    text="🛡 Gemini Guardian روشن شد. برای مدیریت /start را بزنید."
+                )
+            except Exception:
+                # Each admin must press Start first; one unavailable chat must
+                # not prevent other administrators from using the bot.
+                log.info("Startup message unavailable for admin %d; send /start first.", admin_id)
 
     async def schedule_tick(self, context: ContextTypes.DEFAULT_TYPE):
         if self.manager:
@@ -72,7 +74,7 @@ class GuardianBot:
     async def allowed(self, update: Update) -> bool:
         user = update.effective_user
         chat = update.effective_chat
-        if user and user.id == self.admin_id and chat and chat.type == ChatType.PRIVATE:
+        if user and user.id in self.admin_ids and chat and chat.type == ChatType.PRIVATE:
             return True
         if update.callback_query:
             await update.callback_query.answer("⛔ دسترسی مجاز نیست.", show_alert=True)

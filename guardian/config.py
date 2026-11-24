@@ -79,15 +79,23 @@ def validate_setting(key: str, value: str) -> str:
     return value.lower() if key == "STOP_ON_ACCOUNT_ISSUE" else value
 
 
-def bootstrap_credentials() -> tuple[str, int]:
+def bootstrap_credentials() -> tuple[str, tuple[int, ...]]:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    raw = os.environ.get("TELEGRAM_ADMIN_ID", "").strip()
+    # A new multi-admin list takes precedence over the legacy single-admin key.
+    raw = (os.environ.get("TELEGRAM_ADMIN_IDS", "").strip()
+           or os.environ.get("TELEGRAM_ADMIN_ID", "").strip())
     if not token or not raw:
-        raise RuntimeError("Set TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_ID in .env")
-    try:
-        admin_id = int(raw)
-    except ValueError as exc:
-        raise RuntimeError("TELEGRAM_ADMIN_ID must be a numeric Telegram user ID") from exc
-    if admin_id <= 0:
-        raise RuntimeError("TELEGRAM_ADMIN_ID must be positive")
-    return token, admin_id
+        raise RuntimeError("Set TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_IDS (or TELEGRAM_ADMIN_ID) in .env")
+    ids = []
+    for item in raw.split(","):
+        value = item.strip()
+        if not value or not value.isascii() or not value.isdecimal():
+            raise RuntimeError("Admin IDs must be positive numeric Telegram user IDs separated by commas")
+        admin_id = int(value)
+        if admin_id <= 0:
+            raise RuntimeError("Admin IDs must be positive")
+        if admin_id not in ids:
+            ids.append(admin_id)
+    if len(ids) > 20:
+        raise RuntimeError("A maximum of 20 Telegram administrators is supported")
+    return token, tuple(ids)
