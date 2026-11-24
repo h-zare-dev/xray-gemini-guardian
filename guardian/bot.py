@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import collections
 import csv
 import html
 import io
@@ -18,6 +17,7 @@ from telegram.ext import MessageHandler, filters
 
 from .config import EDITABLE_SETTINGS, REPORT_DIR, bootstrap_credentials, validate_setting
 from .manager import RunManager, STATUS_ICON
+from .reporting import filtered, summary
 from .sources import (fetch_subscription, parse_subscription, ports_from_spec,
                       safe_source_label, targets_for_run, validate_subscription_url)
 from .storage import Store
@@ -241,37 +241,62 @@ class GuardianBot:
                 [("🔴 بستن و ذخیره نشست", "login:close")],
                 [("🏠 منوی اصلی", "home")]))
 
-    async def reports(self, update: Update, run_id: int | None = None):
+    async def reports(self, update: Update, run_id: int | None = None,
+                      group: str = "all", page: int = 0):
         run = self.store.run(run_id) if run_id else self.store.latest_run()
         if not run:
             await self.view(update, "📊 هنوز گزارشی ثبت نشده است.",
                             markup([("🏠 منوی اصلی", "home")]))
             return
-        results = self.store.results(run["id"])
-        counts = collections.Counter(r["status"] for r in results)
-        lines = [f"{STATUS_ICON.get(status,'🔎')} {status}: {count}"
-                 for status, count in counts.items()]
+        results = self.store.run_entries(run["id"])
+        stats = summary(run, results)
+        try:
+            selected = filtered(results, group)
+        except ValueError:
+            group, selected = "all", results
+        per_page = 12
+        last_page = max(0, (len(selected) - 1) // per_page)
+        page = max(0, min(page, last_page))
+        visible = selected[page * per_page:(page + 1) * per_page]
         sample = "\n".join(
-            f"• <code>{r['port']}</code> {html.escape(r['name'][:25])}: "
-            f"{html.escape(r['status'])}" for r in results[-8:])
+            f"{STATUS_ICON.get(r['status'],'🔎')} "
+            f"<code>{r['port']}</code> {html.escape(r['status'])} "
+            f"(تلاش {r['attempts']})"
+            for r in visible
+        ) or "در این دسته پورتی وجود ندارد."
         image_rows = []
-        for r in reversed(results):
+        for r in visible:
             if r["screenshot"]:
-                image_rows.append([(f"📸 پورت {r['port']} | {r['status']}",
-                                    f"reports:image:{run['id']}:{r['sequence']}")])
-            if len(image_rows) >= 5:
-                break
-        buttons = image_rows + [
+                image_rows.append((f"📸 {r['port']}",
+                                   f"reports:image:{run['id']}:{r['sequence']}"))
+        photos = [image_rows[i:i + 3] for i in range(0, min(len(image_rows), 6), 3)]
+        controls = []
+        if page:
+            controls.append(("◀️ قبلی", f"reports:list:{run['id']}:{group}:{page-1}"))
+        controls.append((f"صفحه {page+1}/{last_page+1}", "noop"))
+        if page < last_page:
+            controls.append(("بعدی ▶️", f"reports:list:{run['id']}:{group}:{page+1}"))
+        buttons = [
+            [("📋 همه", f"reports:list:{run['id']}:all:0"),
+             ("✅ سالم", f"reports:list:{run['id']}:ok:0")],
+            [("🚫 منطقه‌ای", f"reports:list:{run['id']}:blocked:0"),
+             ("⚠️ بررسی", f"reports:list:{run['id']}:review:0")],
+            [("⏳ تست‌نشده", f"reports:list:{run['id']}:pending:0")],
+            controls,
+        ] + photos + [
             [("📄 دانلود CSV", f"reports:csv:{run['id']}"),
              ("📚 تاریخچه", "reports:history")],
-            [("🔄 تازه‌سازی", f"reports:view:{run['id']}"), ("🏠 منوی اصلی", "home")]
+            [("🔄 تازه‌سازی", f"reports:list:{run['id']}:{group}:{page}"),
+             ("🏠 منوی اصلی", "home")]
         ]
         await self.view(update,
             f"📊 <b>گزارش #{run['id']}</b>\n"
             f"وضعیت: {html.escape(run['state'])}\n"
             f"شروع: <code>{run['started_at']}</code>\n"
-            f"پیشرفت: {run['completed']}/{run['total']}\n\n"
-            + html.escape("\n".join(lines) or "بدون نتیجه") + "\n\n"
+            f"🧪 تست‌شده: {stats.done}/{stats.total}\n"
+            f"✅ سالم: {stats.ok} | 🚫 منطقه‌ای: {stats.blocked}\n"
+            f"⚠️ نیازمند بررسی: {stats.review} | ⏳ باقی: {stats.pending}\n\n"
+            f"<b>فهرست {html.escape(group)} ({len(selected)} مورد):</b>\n"
             + sample,
             markup(*buttons))
 
@@ -291,7 +316,7 @@ class GuardianBot:
         fieldnames = ["sequence", "name", "port", "status", "detail", "attempts", "created_at"]
         writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(self.store.results(run["id"]))
+        writer.writerows(self.store.run_entries(run["id"]))
         document = io.BytesIO(buffer.getvalue().encode("utf-8-sig"))
         document.name = f"guardian-run-{run['id']}.csv"
         await update.effective_chat.send_document(
@@ -358,6 +383,10 @@ class GuardianBot:
             return await self.reports(update)
         if action == "reports:history":
             return await self.history(update)
+        if action.startswith("reports:list:"):
+            fields = action.split(":")
+            if len(fields) == 5:
+                return await self.reports(update, int(fields[2]), fields[3], int(fields[4]))
         if action.startswith("reports:view:"):
             return await self.reports(update, int(action.rsplit(":", 1)[1]))
         if action == "reports:csv":

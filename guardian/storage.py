@@ -56,6 +56,12 @@ class Store:
                     PRIMARY KEY (run_id, sequence),
                     FOREIGN KEY (run_id) REFERENCES runs(id)
                 );
+                CREATE TABLE IF NOT EXISTS run_targets (
+                    run_id INTEGER NOT NULL, sequence INTEGER NOT NULL,
+                    name TEXT NOT NULL, port INTEGER NOT NULL,
+                    PRIMARY KEY (run_id, sequence),
+                    FOREIGN KEY (run_id) REFERENCES runs(id)
+                );
             """)
             for key, value in DEFAULT_SETTINGS.items():
                 db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", (key, value))
@@ -144,10 +150,19 @@ class Store:
             ).fetchall()
         return [Target(r["name"], r["uri"], r["port"]) for r in rows]
 
-    def begin_run(self, count: int) -> int:
+    def begin_run(self, count: int, targets=None) -> int:
         with self.connect() as db:
             cursor = db.execute("INSERT INTO runs(started_at,state,total) VALUES (?,?,?)",
                                 (utc_now(), "running", count))
+            if targets is not None:
+                entries = list(targets)
+                if len(entries) != count:
+                    raise ValueError("Run target count mismatch")
+                db.executemany(
+                    "INSERT INTO run_targets(run_id,sequence,name,port) VALUES (?,?,?,?)",
+                    [(cursor.lastrowid, idx, t.name, t.port)
+                     for idx, t in enumerate(entries, 1)],
+                )
             return cursor.lastrowid
 
     def add_result(self, run_id: int, idx: int, name: str, port: int,
@@ -185,3 +200,25 @@ class Store:
             return [dict(r) for r in db.execute(
                 "SELECT * FROM results WHERE run_id=? ORDER BY sequence LIMIT ?",
                 (run_id, limit))]
+
+    def run_entries(self, run_id: int, limit: int = 1000):
+        """Full planned manifest joined to results; legacy runs fall back safely."""
+        with self.connect() as db:
+            manifest = db.execute(
+                "SELECT t.run_id,t.sequence,t.name,t.port,"
+                " COALESCE(r.status,'NOT_TESTED') AS status,"
+                " COALESCE(r.detail,'Not reached yet') AS detail,"
+                " COALESCE(r.attempts,0) AS attempts,"
+                " COALESCE(r.screenshot,'') AS screenshot,"
+                " COALESCE(r.created_at,'') AS created_at"
+                " FROM run_targets t LEFT JOIN results r"
+                " ON r.run_id=t.run_id AND r.sequence=t.sequence"
+                " WHERE t.run_id=? ORDER BY t.sequence LIMIT ?",
+                (run_id, limit),
+            ).fetchall()
+            if manifest:
+                return [dict(row) for row in manifest]
+            return [dict(r) for r in db.execute(
+                "SELECT * FROM results WHERE run_id=? ORDER BY sequence LIMIT ?",
+                (run_id, limit),
+            )]

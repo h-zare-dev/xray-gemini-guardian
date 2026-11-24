@@ -9,16 +9,9 @@ from pathlib import Path
 
 from .checker import ACCOUNT_STATES, BrowserChecker
 from .config import REPORT_DIR
+from .reporting import STATUS_ICON, bucket, full_report_chunks, progress_message, summary
 from .sources import targets_for_run
 from .storage import Store
-
-
-STATUS_ICON = {
-    "WEB_OK": "✅", "REGION_BLOCKED": "🌍", "ACCOUNT_RESTRICTED": "🚫",
-    "LOGIN_REQUIRED": "🔐", "VERIFICATION_REQUIRED": "🛡",
-    "RETRYABLE_NETWORK": "🔌", "TEST_ERROR": "⚠️",
-    "INCONCLUSIVE": "❔", "NO_EDITOR": "❔", "STOPPED": "⏹",
-}
 
 
 class RunManager:
@@ -87,11 +80,11 @@ class RunManager:
 
     def _run(self, targets):
         settings = self.store.settings()
-        run_id = self.store.begin_run(len(targets))
+        run_id = self.store.begin_run(len(targets), targets)
         folder = REPORT_DIR / f"run_{run_id:06d}"
         checker = BrowserChecker(settings, folder)
         state, note = "completed", ""
-        counts = collections.Counter()
+        bucket_counts = collections.Counter()
         try:
             self.tell(f"🧪 Gemini Guardian | گزارش #{run_id}\nتعداد خروجی: {len(targets)}\n"
                       "در حال بررسی واقعی پاسخ Gemini Web…")
@@ -103,13 +96,13 @@ class RunManager:
                 if result.status == "STOPPED":
                     state, note = "stopped", "Stopped by administrator"
                     break
-                counts[result.status] += 1
+                bucket_counts[bucket(result.status)] += 1
                 self.store.add_result(run_id, index, target.name, target.port, result.status,
                                       result.detail, result.attempts, result.screenshot)
-                icon = STATUS_ICON.get(result.status, "🔎")
-                if result.status != "WEB_OK" or index % 5 == 0 or index == len(targets):
-                    self.tell(f"{icon} [{index}/{len(targets)}] {target.name[:42]} : {target.port}\n"
-                              f"نتیجه: {result.status} | تلاش: {result.attempts}")
+                # Every result is sent immediately, including WEB_OK.
+                # A failed port in the middle of five successes is never hidden.
+                self.tell(progress_message(index, target, result,
+                                           bucket_counts, len(targets)))
                 policy = settings.get("SCREENSHOT_SEND", "on_error")
                 if result.screenshot and (policy == "all" or
                     (policy == "on_error" and result.status != "WEB_OK")):
@@ -130,9 +123,20 @@ class RunManager:
             self.tell(f"⚠️ آزمون با خطای سیستمی {note} متوقف شد. نتیجه قبلی ذخیره است.")
         finally:
             self.store.finish_run(run_id, state, note)
-            summary = " | ".join(f"{STATUS_ICON.get(k,'•')}{k}: {v}" for k, v in counts.items())
-            self.tell(f"🏁 گزارش #{run_id}\nوضعیت: {state}\n{summary or 'بدون نتیجه'}\n"
-                      "📋 گزارش کامل و تصاویر از منوی «گزارش‌ها» در دسترس است.")
+            entries = self.store.run_entries(run_id)
+            stats = summary({"total": len(targets)}, entries)
+            self.tell(
+                f"🏁 گزارش نهایی #{run_id} | {state}\n"
+                f"🧪 تست‌شده: {stats.done}/{stats.total}\n"
+                f"✅ سالم (WEB_OK): {stats.ok}\n"
+                f"🚫 محدودیت منطقه‌ای: {stats.blocked}\n"
+                f"⚠️ خطا/نیازمند بررسی: {stats.review}\n"
+                f"⏳ تست‌نشده: {stats.pending}\n"
+                "📊 فهرست تک‌تک پورت‌ها در پیام‌های بعدی و بخش گزارش‌ها:"
+            )
+            chunks = full_report_chunks(entries)
+            for number, chunk in enumerate(chunks, 1):
+                self.tell(f"📋 گزارش #{run_id} — بخش {number}/{len(chunks)}\n{chunk}")
 
     def start_login(self) -> tuple[bool, str]:
         import subprocess
