@@ -144,7 +144,7 @@ class RunManager:
                 return True, "مرورگر ورود Google همین حالا باز است."
             self._login_proc = subprocess.Popen(
                 ["/usr/bin/google-chrome", f"--user-data-dir={PROFILE_DIR}",
-                 "--no-first-run", "--no-proxy-server", "--new-window",
+                 "--no-first-run", "--no-proxy-server", "--no-sandbox", "--new-window",
                  "https://gemini.google.com/app"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,

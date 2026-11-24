@@ -19,6 +19,9 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.path.parent, 0o700)
         with self.connect() as db:
+            # Set WAL once. Repeating journal-mode transitions on every worker
+            # read can unnecessarily contend with live results writes.
+            db.execute("PRAGMA journal_mode = WAL")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL
@@ -63,7 +66,6 @@ class Store:
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys = ON")
         db.execute("PRAGMA busy_timeout = 30000")
-        db.execute("PRAGMA journal_mode = WAL")
         return db
 
     def get(self, key: str) -> str:
